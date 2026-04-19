@@ -23,7 +23,11 @@ import {
   Code,
   ThumbsUp,
   ThumbsDown,
-  CheckCircle2
+  CheckCircle2,
+  Settings,
+  X,
+  AlertTriangle,
+  ZapOff
 } from 'lucide-react';
 
 // --- Types ---
@@ -50,6 +54,14 @@ type JsonPayload = {
   headers?: Record<string, string>;
   body?: any;
   metadata?: Record<string, any>;
+  [key: string]: any;
+};
+
+type ConfigState = {
+  primaryProvider: string;
+  secondaryProvider: string;
+  maxTokenBudget: number;
+  simulateTimeout: boolean;
 };
 
 // --- Initial Data ---
@@ -68,6 +80,13 @@ export default function App() {
   const [pipeline, setPipeline] = useState<PipelineStep[]>(INITIAL_PIPELINE);
   const [payload, setPayload] = useState<JsonPayload | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [config, setConfig] = useState<ConfigState>({
+    primaryProvider: 'OpenAI (GPT-4o)',
+    secondaryProvider: 'Anthropic (Claude 3.5 Sonnet)',
+    maxTokenBudget: 4096,
+    simulateTimeout: false
+  });
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -113,6 +132,7 @@ export default function App() {
     const steps = [...INITIAL_PIPELINE];
     
     for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
       // Set current step to processing
       steps[i] = { ...steps[i], status: 'processing' };
       setPipeline([...steps]);
@@ -120,12 +140,51 @@ export default function App() {
       // Update Payload Inspector based on step
       updatePayloadForStep(steps[i].id, query);
       
-      // Simulate processing time
-      await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
-      
-      // Complete step
-      steps[i] = { ...steps[i], status: 'completed' };
-      setPipeline([...steps]);
+      // Handle Simulation for LLM step
+      if (step.id === 'llm' && config.simulateTimeout) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+        
+        // Fail primary
+        steps[i] = { ...steps[i], status: 'error', description: 'PRIMARY_PROVIDER_TIMEOUT' };
+        setPipeline([...steps]);
+        
+        setPayload({
+          error: "504 Gateway Timeout",
+          provider: config.primaryProvider,
+          message: "Upstream service failed to respond within 5000ms"
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        // Circuit breaker trip visual
+        setPayload({
+          event: "CIRCUIT_BREAKER_TRIPPED",
+          action: "Routing to Fallback",
+          fallback_provider: config.secondaryProvider
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 1200));
+
+        // Fallback success
+        setPayload({
+          status: "200 OK",
+          provider: config.secondaryProvider,
+          constructed_prompt: `User Query: ${query}\n\nContext Chunks: ...`,
+          model: "claude-3-5-sonnet",
+          latency_ms: 1420
+        });
+
+        // Continue as completed after fallback
+        steps[i] = { ...steps[i], status: 'completed', description: `Fallback Active: ${config.secondaryProvider}` };
+        setPipeline([...steps]);
+      } else {
+        // Simulate processing time
+        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
+        
+        // Complete step normally
+        steps[i] = { ...steps[i], status: 'completed' };
+        setPipeline([...steps]);
+      }
     }
 
     // 1.5-second simulated loading state before showing the final response
@@ -199,6 +258,13 @@ export default function App() {
           RAG-CORE ARCH v2.4
         </div>
         <div className="flex items-center gap-4">
+          <button 
+            onClick={() => setIsConfigOpen(true)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-bg-main border border-border-color rounded hover:bg-white transition-all text-[11px] font-bold text-text-muted hover:text-primary mr-2"
+          >
+            <Settings className="w-3.5 h-3.5" />
+            CONFIG_SERVICE
+          </button>
           <span className="text-[12px] text-text-muted font-mono">LATENCY: {isProcessing ? (120 + Math.floor(Math.random() * 50)) : 0}ms</span>
           <div className="flex items-center gap-2 bg-[#dcfce7] text-[#166534] text-[11px] px-2 py-0.5 rounded-full font-semibold">
             <div className={`w-2 h-2 rounded-full ${isProcessing ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
@@ -375,6 +441,117 @@ export default function App() {
           </footer>
         </section>
       </div>
+
+      {/* --- CONFIGURATION MODAL --- */}
+      <AnimatePresence>
+        {isConfigOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-text-main/20 backdrop-blur-sm">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="w-full max-w-md bg-white border border-border-color shadow-2xl rounded-xl overflow-hidden flex flex-col"
+            >
+              <header className="p-4 border-b border-border-color flex items-center justify-between bg-bg-main">
+                <div className="flex items-center gap-2 font-bold text-[12px] tracking-wider uppercase text-text-muted">
+                  <Settings className="w-4 h-4" />
+                  Configuration Service
+                </div>
+                <button 
+                  onClick={() => setIsConfigOpen(false)}
+                  className="p-1 hover:bg-border-color rounded transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </header>
+
+              <div className="p-6 space-y-6">
+                {/* Primary Provider */}
+                <div className="space-y-2">
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Primary LLM Provider</label>
+                  <select 
+                    value={config.primaryProvider}
+                    onChange={(e) => setConfig({...config, primaryProvider: e.target.value})}
+                    className="w-full p-2.5 bg-bg-main border border-border-color rounded text-sm focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
+                  >
+                    <option>OpenAI (GPT-4o)</option>
+                    <option>Anthropic (Claude 3.5 Sonnet)</option>
+                    <option>Local (Llama 3 8B)</option>
+                  </select>
+                </div>
+
+                {/* Secondary Provider */}
+                <div className="space-y-2">
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Secondary/Fallback LLM Provider</label>
+                  <select 
+                    value={config.secondaryProvider}
+                    onChange={(e) => setConfig({...config, secondaryProvider: e.target.value})}
+                    className="w-full p-2.5 bg-bg-main border border-border-color rounded text-sm focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
+                  >
+                    <option>Anthropic (Claude 3.5 Sonnet)</option>
+                    <option>OpenAI (GPT-4o)</option>
+                    <option>Local (Mistral v0.3)</option>
+                  </select>
+                </div>
+
+                {/* Max Token Budget */}
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Max Token Budget</label>
+                    <span className="text-[11px] font-mono text-primary font-bold">{config.maxTokenBudget} tokens</span>
+                  </div>
+                  <input 
+                    type="range" 
+                    min="512" 
+                    max="128000" 
+                    step="512"
+                    value={config.maxTokenBudget}
+                    onChange={(e) => setConfig({...config, maxTokenBudget: parseInt(e.target.value)})}
+                    className="w-full h-1.5 bg-border-color rounded-lg appearance-none cursor-pointer accent-primary"
+                  />
+                  <div className="flex justify-between text-[9px] font-mono text-text-muted opacity-60">
+                    <span>512</span>
+                    <span>128K</span>
+                  </div>
+                </div>
+
+                {/* Simulation Toggles */}
+                <div className="pt-4 border-t border-border-color">
+                  <div className="flex items-center justify-between p-3 bg-red-50/50 border border-red-200 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center">
+                        <ZapOff className="w-4 h-4 text-red-600" />
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-xs font-bold text-red-900">Simulate Timeout</span>
+                        <span className="text-[10px] text-red-700 opacity-80">Trigger 504 Gateway error in step 5</span>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        className="sr-only peer"
+                        checked={config.simulateTimeout}
+                        onChange={(e) => setConfig({...config, simulateTimeout: e.target.checked})}
+                      />
+                      <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-500"></div>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <footer className="p-4 bg-bg-main border-t border-border-color flex justify-end gap-3">
+                <button 
+                  onClick={() => setIsConfigOpen(false)}
+                  className="px-4 py-2 bg-primary text-white rounded-lg text-xs font-bold shadow-sm hover:opacity-90 transition-opacity"
+                >
+                  Save Configuration
+                </button>
+              </footer>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
