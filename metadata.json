@@ -1,0 +1,6 @@
+{
+  "name": "Enterprise RAG Visualizer",
+  "description": "A technical demonstration of an Enterprise RAG Architecture with a dynamic pipeline visualizer and payload inspector.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
