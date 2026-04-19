@@ -86,7 +86,20 @@ type ConfigState = {
   secondaryProvider: string;
   maxTokenBudget: number;
   simulateTimeout: boolean;
+  retrievalStrategy: 'dense' | 'hybrid';
+  alphaWeight: number;
+  topK: number;
+  temperature: number;
+  persona: 'factual' | 'creative' | 'code';
 };
+
+const MOCK_DOCS = [
+  { id: 'doc_1', title: 'Q3 Financial Report 2025', text: 'Net revenue increased by 14% year-over-year. Operating margin stabilized at 22%.', metadata: { department: 'Finance', date: '2025-09', confidence: 0.94 } },
+  { id: 'doc_2', title: '2026 Remote Work Policy', text: 'Employees may work remotely up to 3 days per week. Office core hours are 10 AM to 3 PM.', metadata: { department: 'HR', date: '2026-01', confidence: 0.89 } },
+  { id: 'doc_3', title: 'Kubernetes Deployment Runbook', text: 'Standard deployment utilizes Helm v3.4. Ensure resource limits are set to 500m CPU.', metadata: { department: 'Engineering', date: '2025-11', confidence: 0.96 } },
+  { id: 'doc_4', title: 'Employee Benefits Matrix', text: 'Health coverage includes dental, vision, and mental health support with $0 co-pay.', metadata: { department: 'HR', date: '2026-01', confidence: 0.85 } },
+  { id: 'doc_5', title: 'Environmental Sustainability Goals', text: 'Mission: achieve net-zero carbon emissions by 2030 through renewable energy transition.', metadata: { department: 'Corporate', date: '2025-12', confidence: 0.91 } },
+];
 
 // --- Initial Data ---
 
@@ -109,7 +122,12 @@ export default function App() {
     primaryProvider: 'OpenAI (GPT-4o)',
     secondaryProvider: 'Anthropic (Claude 3.5 Sonnet)',
     maxTokenBudget: 4096,
-    simulateTimeout: false
+    simulateTimeout: false,
+    retrievalStrategy: 'dense',
+    alphaWeight: 0.5,
+    topK: 3,
+    temperature: 0.2,
+    persona: 'factual'
   });
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isBlueprintMode, setIsBlueprintMode] = useState(false);
@@ -118,6 +136,15 @@ export default function App() {
   const [indexerLogs, setIndexerLogs] = useState<string[]>([]);
   const [isIndexing, setIsIndexing] = useState(false);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [currentLatency, setCurrentLatency] = useState(0);
+  const [latencyHistory, setLatencyHistory] = useState([
+    { name: 'Req 1', retrieval: 180, generation: 1100 },
+    { name: 'Req 2', retrieval: 250, generation: 1400 },
+    { name: 'Req 3', retrieval: 210, generation: 900 },
+    { name: 'Req 4', retrieval: 450, generation: 1600 },
+    { name: 'Req 5', retrieval: 195, generation: 1250 },
+  ]);
+  const [feedbackStats, setFeedbackStats] = useState({ accepted: 10, rejected: 2 });
   const scrollRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
 
@@ -166,8 +193,60 @@ export default function App() {
     await runPipeline(input);
   };
 
+  const handleCitationClick = (num: number) => {
+    const docIndex = num - 1;
+    if (docIndex >= 0 && docIndex < MOCK_DOCS.length) {
+      setPayload({
+        event: "CITATION_INSPECT",
+        doc_id: MOCK_DOCS[docIndex].id,
+        source: MOCK_DOCS[docIndex].title,
+        confidence_score: MOCK_DOCS[docIndex].metadata.confidence,
+        raw_text: MOCK_DOCS[docIndex].text,
+        metadata: MOCK_DOCS[docIndex].metadata
+      });
+      setSelectedStepId('retriever');
+    }
+  };
+
+  const handleFeedback = (messageId: string, feedback: 'up' | 'down') => {
+    setMessages(prev => prev.map(m => {
+      if (m.id === messageId) {
+        return { ...m, feedback };
+      }
+      return m;
+    }));
+
+    setFeedbackStats(prev => ({
+      ...prev,
+      accepted: feedback === 'up' ? prev.accepted + 1 : prev.accepted,
+      rejected: feedback === 'down' ? prev.rejected + 1 : prev.rejected
+    }));
+  };
+
+  const renderContentWithCitations = (content: string) => {
+    const parts = content.split(/(\[\d+\])/g);
+    return parts.map((part, i) => {
+      const match = part.match(/\[(\d+)\]/);
+      if (match) {
+        const num = parseInt(match[1]);
+        return (
+          <button
+            key={i}
+            onClick={() => handleCitationClick(num)}
+            className="mx-0.5 inline-flex items-center justify-center w-4 h-4 text-[9px] font-bold bg-primary/10 text-primary border border-primary/20 rounded hover:bg-primary hover:text-white transition-all transform hover:scale-110 active:scale-95 shadow-sm"
+          >
+            {num}
+          </button>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+
   const runPipeline = async (query: string) => {
     const steps = [...INITIAL_PIPELINE];
+    let retrievalLat = 0;
+    let generationLat = 0;
     
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
@@ -179,6 +258,16 @@ export default function App() {
       // Update Payload Inspector based on step
       updatePayloadForStep(steps[i].id, query);
       
+      // Dynamic Latency Calculation
+      let stepLat = 800 + Math.random() * 400;
+      if (step.id === 'retriever') {
+        retrievalLat = 150 + Math.floor(Math.random() * 250);
+        stepLat = retrievalLat;
+      } else if (step.id === 'llm') {
+        generationLat = 800 + Math.floor(Math.random() * 1200);
+        stepLat = generationLat;
+      }
+
       // Handle Simulation for LLM step
       if (step.id === 'llm' && config.simulateTimeout) {
         await new Promise(resolve => setTimeout(resolve, 800));
@@ -219,7 +308,7 @@ export default function App() {
         setPipeline([...steps]);
       } else {
         // Simulate processing time
-        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
+        await new Promise(resolve => setTimeout(resolve, stepLat));
         
         // Complete step normally
         steps[i] = { ...steps[i], status: 'completed' };
@@ -227,14 +316,27 @@ export default function App() {
       }
     }
 
-    // 1.5-second simulated loading state before showing the final response
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // Update Global Latency State
+    const totalLat = retrievalLat + generationLat;
+    setCurrentLatency(totalLat);
+    setLatencyHistory(prev => {
+      const newHistory = [...prev, { 
+        name: `Req ${prev.length + 1}`, 
+        retrieval: retrievalLat, 
+        generation: generationLat 
+      }];
+      if (newHistory.length > 7) return newHistory.slice(1);
+      return newHistory;
+    });
+
+    // simulated loading state before showing the final response
+    await new Promise(resolve => setTimeout(resolve, 800));
 
     // Add Assistant Response
     const assistantMessage: Message = {
       id: (Date.now() + 1).toString(),
       role: 'assistant',
-      content: getMockResponse(query),
+      content: getMockResponse(query, config),
       timestamp: new Date().toLocaleTimeString(),
     };
     setMessages(prev => [...prev, assistantMessage]);
@@ -265,17 +367,30 @@ export default function App() {
         break;
       case 'retriever':
         setPayload({
-          results: [
-            { id: "doc_77", score: 0.89, text: "The new HR policy states that all employees are eligible for dynamic benefits tracking starting FY2026..." },
-            { id: "doc_12", score: 0.74, text: "Standard PTO is allocated at 25 days per annum for full-time staff members..." }
-          ]
+          strategy: config.retrievalStrategy,
+          alpha: config.retrievalStrategy === 'hybrid' ? config.alphaWeight : null,
+          top_k: config.topK,
+          results: MOCK_DOCS.slice(0, config.topK).map(d => ({
+            id: d.id,
+            title: d.title,
+            score: d.metadata.confidence,
+            snippet: d.text.substring(0, 80) + "..."
+          }))
         });
         break;
       case 'llm':
+        const personaPrompts = {
+          factual: "You are a precise technical librarian. Answer ONLY with facts from provided chunks.",
+          creative: "You are a creative strategist. Summarize chunks into a visionary narrative.",
+          code: "You are a senior DevOps engineer. Provide executable steps and configs based on docs."
+        };
         setPayload({
-          constructed_prompt: `User Query: ${query}\n\nContext Chunks:\n1. HR policy v2.4 updates...\n2. Standard PTO rules...\n\nInstructions: Answer accurately based ONLY on context.`,
-          model: "gpt-4o-enterprise",
-          temperature: 0.2
+          system_prompt: personaPrompts[config.persona],
+          temperature: config.temperature,
+          top_p: 0.95,
+          user_query: query,
+          context_window_size: `${config.topK} chunks`,
+          max_tokens: config.maxTokenBudget
         });
         break;
     }
@@ -327,12 +442,30 @@ export default function App() {
   ];
   const COLORS = ['#10b981', '#ef4444'];
 
-  const getMockResponse = (q: string) => {
+  const getMockResponse = (q: string, cfg: ConfigState) => {
     const query = q.toLowerCase();
-    if (query.includes('hr') || query.includes('policy')) {
-      return "The new HR policy for 2026 features significant updates, including a transition to an asynchronous-first work model, unlimited PTO (subject to team synchronization), and a 20% increase in professional development stipends. You can find the full document in the internal confluence portal under 'Benefit-Updates-2026'.";
+    const citations = Array.from({ length: cfg.topK }, (_, i) => `[${i + 1}]`).join(' ');
+    
+    if (cfg.temperature < 0.3) {
+      // Dry, structured
+      if (cfg.persona === 'code') {
+        return `## SYSTEM_EXECUTION_STEPS\n1. Initialize gateway protocol.\n2. Apply security headers.\n3. Verify identity via IAM.\n\nValidated against documentation: ${citations}`;
+      }
+      return `RECOVERY_REPORT:\n- Status: Verified\n- Reference IDs: ${citations}\n- Compliance: 100%\n\nDocuments indicate that the enterprise RAG environment is configured for ${cfg.retrievalStrategy} search with a temperature of ${cfg.temperature}.`;
+    } else if (cfg.temperature > 0.7) {
+      // Conversational, verbose
+      let tone = "I'm so glad you asked! Looking through our extensive records, I found some really fascinating insights for you.";
+      if (cfg.persona === 'creative') {
+        tone = "Imagine a world where data flows like a river of light. Based on these beautiful insights I've gathered...";
+      }
+      return `${tone} It seems like the core of what you're looking for relates to our active policies. Specifically, our archives ${citations} mention some really key points about our strategy. Isn't it interesting how everything connects?`;
     }
-    return "The system has retrieved 3 relevant document fragments from the vector store. Based on the RAG pipeline synthesis, the query matches our latest internal documentation regarding your request. How else can I assist with your search today?";
+    
+    // Balanced
+    if (query.includes('hr') || query.includes('policy')) {
+      return `The new HR policy for 2026 features significant updates, including a transition to an asynchronous-first work model [1] and a 20% increase in professional development stipends [2]. You can find the full document in the internal portal. ${citations}`;
+    }
+    return `The system has retrieved ${cfg.topK} relevant document fragments from the vector store [1]. Based on the RAG pipeline synthesis ${cfg.retrievalStrategy === 'hybrid' ? '(Hybrid mode)' : ''}, the query matches our latest documentation. How else can I assist? ${citations}`;
   };
 
   return (
@@ -358,7 +491,7 @@ export default function App() {
             <Settings className="w-3.5 h-3.5" />
             CONFIG_SERVICE
           </button>
-          <span className="text-[12px] text-text-muted font-mono">LATENCY: {isProcessing ? (120 + Math.floor(Math.random() * 50)) : 0}ms</span>
+          <span className="text-[12px] text-text-muted font-mono">LATENCY: {isProcessing ? (120 + Math.floor(Math.random() * 50)) : currentLatency}ms</span>
           <div className="flex items-center gap-2 bg-[#dcfce7] text-[#166534] text-[11px] px-2 py-0.5 rounded-full font-semibold">
             <div className={`w-2 h-2 rounded-full ${isProcessing ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
             {isProcessing ? 'PIPELINE ACTIVE' : 'EDGE ACTIVE'}
@@ -384,18 +517,28 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   className={`message ${m.role === 'user' ? 'message-user' : 'message-ai'}`}
                 >
-                  <p className="text-[13px] leading-relaxed">{m.content}</p>
+                  <div className="text-[13px] leading-relaxed">
+                    {m.role === 'assistant' ? renderContentWithCitations(m.content) : m.content}
+                  </div>
                   <div className={`flex items-center justify-between mt-1`}>
                     <div className={`text-[10px] font-mono opacity-50 ${m.role === 'user' ? 'text-white/70' : ''}`}>
                       {m.timestamp}
                     </div>
                     {m.role === 'assistant' && (
                       <div className="flex gap-2">
-                        <button className="text-text-muted hover:text-primary transition-colors p-0.5">
-                          <ThumbsUp className="w-3 h-3" />
+                        <button 
+                          disabled={!!m.feedback}
+                          onClick={() => handleFeedback(m.id, 'up')}
+                          className={`transition-all p-0.5 ${m.feedback === 'up' ? 'text-emerald-500 scale-110' : 'text-text-muted hover:text-primary'} disabled:cursor-not-allowed`}
+                        >
+                          <ThumbsUp className={`w-3 h-3 ${m.feedback === 'up' ? 'fill-current' : ''}`} />
                         </button>
-                        <button className="text-text-muted hover:text-red-500 transition-colors p-0.5">
-                          <ThumbsDown className="w-3 h-3" />
+                        <button 
+                          disabled={!!m.feedback}
+                          onClick={() => handleFeedback(m.id, 'down')}
+                          className={`transition-all p-0.5 ${m.feedback === 'down' ? 'text-red-500 scale-110' : 'text-text-muted hover:text-red-500'} disabled:cursor-not-allowed`}
+                        >
+                          <ThumbsDown className={`w-3 h-3 ${m.feedback === 'down' ? 'fill-current' : ''}`} />
                         </button>
                       </div>
                     )}
@@ -479,7 +622,7 @@ export default function App() {
                   <div className="step-meta">
                     {step.status === 'processing' ? 'EXECUTING_KERNEL...' : 
                      (step.id === 'retriever' && step.status === 'completed') ? (
-                       <span className="text-primary font-bold">2_CHUNKS_RETRIEVED</span>
+                       <span className="text-primary font-bold">{config.topK}_CHUNKS_RETRIEVED</span>
                      ) :
                      step.status === 'completed' ? 'NODE_SYNC_SUCCESS' : step.description}
                   </div>
@@ -663,7 +806,7 @@ export default function App() {
                   </header>
                   <div className="flex-1 min-h-[140px]">
                     <ResponsiveContainer width="100%" height="100%">
-                      <ReBarChart data={latencyData}>
+                      <ReBarChart data={latencyHistory}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                         <XAxis dataKey="name" hide />
                         <YAxis tick={{fontSize: 9}} width={35} />
@@ -686,13 +829,16 @@ export default function App() {
                     <ResponsiveContainer width="100%" height="100%">
                       <RePieChart>
                         <Pie
-                          data={feedbackData}
+                          data={[
+                            { name: 'Accepted', value: feedbackStats.accepted },
+                            { name: 'Rejected', value: feedbackStats.rejected },
+                          ]}
                           innerRadius={35}
                           outerRadius={50}
                           paddingAngle={5}
                           dataKey="value"
                         >
-                          {feedbackData.map((entry, index) => (
+                          {[0, 1].map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                           ))}
                         </Pie>
@@ -731,66 +877,138 @@ export default function App() {
                 </button>
               </header>
 
-              <div className="p-6 space-y-6">
-                {/* Primary Provider */}
-                <div className="space-y-2">
-                  <label className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Primary LLM Provider</label>
-                  <select 
-                    value={config.primaryProvider}
-                    onChange={(e) => setConfig({...config, primaryProvider: e.target.value})}
-                    className="w-full p-2.5 bg-bg-main border border-border-color rounded text-sm focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
-                  >
-                    <option>OpenAI (GPT-4o)</option>
-                    <option>Anthropic (Claude 3.5 Sonnet)</option>
-                    <option>Local (Llama 3 8B)</option>
-                  </select>
-                </div>
-
-                {/* Secondary Provider */}
-                <div className="space-y-2">
-                  <label className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Secondary/Fallback LLM Provider</label>
-                  <select 
-                    value={config.secondaryProvider}
-                    onChange={(e) => setConfig({...config, secondaryProvider: e.target.value})}
-                    className="w-full p-2.5 bg-bg-main border border-border-color rounded text-sm focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
-                  >
-                    <option>Anthropic (Claude 3.5 Sonnet)</option>
-                    <option>OpenAI (GPT-4o)</option>
-                    <option>Local (Mistral v0.3)</option>
-                  </select>
-                </div>
-
-                {/* Max Token Budget */}
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Max Token Budget</label>
-                    <span className="text-[11px] font-mono text-primary font-bold">{config.maxTokenBudget} tokens</span>
+              <div className="p-6 space-y-5 overflow-y-auto max-h-[70vh]">
+                {/* Providers Group */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-text-muted">Primary LLM</label>
+                    <select 
+                      value={config.primaryProvider}
+                      onChange={(e) => setConfig({...config, primaryProvider: e.target.value})}
+                      className="w-full p-2 bg-bg-main border border-border-color rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
+                    >
+                      <option>OpenAI (GPT-4o)</option>
+                      <option>Anthropic (Claude 3.5 Sonnet)</option>
+                      <option>Local (Llama 3 8B)</option>
+                    </select>
                   </div>
-                  <input 
-                    type="range" 
-                    min="512" 
-                    max="128000" 
-                    step="512"
-                    value={config.maxTokenBudget}
-                    onChange={(e) => setConfig({...config, maxTokenBudget: parseInt(e.target.value)})}
-                    className="w-full h-1.5 bg-border-color rounded-lg appearance-none cursor-pointer accent-primary"
-                  />
-                  <div className="flex justify-between text-[9px] font-mono text-text-muted opacity-60">
-                    <span>512</span>
-                    <span>128K</span>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-text-muted">Secondary LLM</label>
+                    <select 
+                      value={config.secondaryProvider}
+                      onChange={(e) => setConfig({...config, secondaryProvider: e.target.value})}
+                      className="w-full p-2 bg-bg-main border border-border-color rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer"
+                    >
+                      <option>Anthropic (Claude 3.5 Sonnet)</option>
+                      <option>OpenAI (GPT-4o)</option>
+                      <option>Local (Mistral v0.3)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Retrieval Strategy */}
+                <div className="pt-4 border-t border-border-color space-y-4">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-text-muted">Retrieval Strategy</label>
+                    <div className="flex bg-bg-main p-1 rounded-lg border border-border-color">
+                      <button 
+                        onClick={() => setConfig({...config, retrievalStrategy: 'dense'})}
+                        className={`px-3 py-1 rounded text-[10px] font-bold transition-all ${config.retrievalStrategy === 'dense' ? 'bg-white shadow text-primary' : 'text-text-muted hover:text-primary'}`}
+                      >
+                        DENSE
+                      </button>
+                      <button 
+                        onClick={() => setConfig({...config, retrievalStrategy: 'hybrid'})}
+                        className={`px-3 py-1 rounded text-[10px] font-bold transition-all ${config.retrievalStrategy === 'hybrid' ? 'bg-white shadow text-primary' : 'text-text-muted hover:text-primary'}`}
+                      >
+                        HYBRID
+                      </button>
+                    </div>
+                  </div>
+
+                  {config.retrievalStrategy === 'hybrid' && (
+                    <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                      <div className="flex justify-between items-center text-[10px] font-mono">
+                        <span className="text-text-muted font-bold">ALPHA WEIGHT (BM25 vs Vector)</span>
+                        <span className="text-primary font-bold">{config.alphaWeight.toFixed(2)}</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="1" step="0.05"
+                        value={config.alphaWeight}
+                        onChange={(e) => setConfig({...config, alphaWeight: parseFloat(e.target.value)})}
+                        className="w-full h-1 bg-border-color rounded-lg appearance-none cursor-pointer accent-primary"
+                      />
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center text-[10px] font-mono">
+                      <span className="text-text-muted font-bold">TOP-K CHUNKS</span>
+                      <span className="text-primary font-bold">{config.topK}</span>
+                    </div>
+                    <input 
+                      type="range" min="1" max="5" step="1"
+                      value={config.topK}
+                      onChange={(e) => setConfig({...config, topK: parseInt(e.target.value)})}
+                      className="w-full h-1 bg-border-color rounded-lg appearance-none cursor-pointer accent-primary"
+                    />
+                  </div>
+                </div>
+
+                {/* LLM Parameters */}
+                <div className="pt-4 border-t border-border-color space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-text-muted">System Prompt Persona</label>
+                    <select 
+                      value={config.persona}
+                      onChange={(e) => setConfig({...config, persona: e.target.value as any})}
+                      className="w-full p-2 bg-bg-main border border-border-color rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-primary appearance-none cursor-pointer font-medium"
+                    >
+                      <option value="factual">Strict Factual (Technical Librarian)</option>
+                      <option value="creative">Creative Summarizer (Strategic Analyst)</option>
+                      <option value="code">Code Assistant (DevOps Engineer)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center text-[10px] font-mono">
+                      <span className="text-text-muted font-bold">LLM TEMPERATURE</span>
+                      <span className="text-primary font-bold">{config.temperature.toFixed(1)}</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="1" step="0.1"
+                      value={config.temperature}
+                      onChange={(e) => setConfig({...config, temperature: parseFloat(e.target.value)})}
+                      className="w-full h-1 bg-border-color rounded-lg appearance-none cursor-pointer accent-primary"
+                    />
+                    <div className="flex justify-between text-[9px] font-mono opacity-40">
+                      <span>PRECISE</span>
+                      <span>CREATIVE</span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center text-[10px] font-mono text-text-muted uppercase font-bold">
+                      <span>Max Token Budget</span>
+                      <span className="text-primary">{config.maxTokenBudget}</span>
+                    </div>
+                    <input 
+                      type="range" min="512" max="128000" step="512"
+                      value={config.maxTokenBudget}
+                      onChange={(e) => setConfig({...config, maxTokenBudget: parseInt(e.target.value)})}
+                      className="w-full h-1 bg-border-color rounded-lg appearance-none cursor-pointer accent-primary"
+                    />
                   </div>
                 </div>
 
                 {/* Simulation Toggles */}
                 <div className="pt-4 border-t border-border-color">
-                  <div className="flex items-center justify-between p-3 bg-red-50/50 border border-red-200 rounded-lg">
+                  <div className="flex items-center justify-between p-3 bg-red-50/30 border border-red-100 rounded-lg">
                     <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center">
-                        <ZapOff className="w-4 h-4 text-red-600" />
-                      </div>
+                      <ZapOff className="w-4 h-4 text-red-500" />
                       <div className="flex flex-col">
-                        <span className="text-xs font-bold text-red-900">Simulate Timeout</span>
-                        <span className="text-[10px] text-red-700 opacity-80">Trigger 504 Gateway error in step 5</span>
+                        <span className="text-[11px] font-bold text-red-900">Simulate Timeout</span>
+                        <span className="text-[9px] text-red-700 opacity-70 italic">Trigger downstream failure</span>
                       </div>
                     </div>
                     <label className="relative inline-flex items-center cursor-pointer">
@@ -800,7 +1018,7 @@ export default function App() {
                         checked={config.simulateTimeout}
                         onChange={(e) => setConfig({...config, simulateTimeout: e.target.checked})}
                       />
-                      <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-500"></div>
+                      <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-500"></div>
                     </label>
                   </div>
                 </div>
